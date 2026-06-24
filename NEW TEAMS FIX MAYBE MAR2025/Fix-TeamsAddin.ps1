@@ -1,15 +1,18 @@
 ﻿<#
   Fix-TeamsAddin.ps1  -  ONE-STOP Teams Meeting add-in fix
 
-  Just run Fix-TeamsAddin.bat. This script:
+  Designed to be copied into C:\Windows\System32 (alongside Fix-TeamsAddin.bat
+  and MicrosoftTeamsMeetingAddinInstaller.msi) on locked-down machines that only
+  allow scripts to run from System32. It also runs fine straight from a folder.
+
+  What it does:
     1. Detects the logged-in user automatically (whoever runs it).
     2. If the add-in is already on the PC  -> registers it (no admin needed).
-    3. If the add-in is MISSING            -> installs it from
-       MicrosoftTeamsMeetingAddinInstaller.msi, into THIS user's profile.
-       It only asks for admin if the install actually needs it.
+    3. If the add-in is MISSING            -> installs it from the .msi sitting
+       next to it, into THIS user's profile (asks for admin only if needed).
     4. Enables it in Outlook (LoadBehavior = 3).
-    5. Works with any version (never hard-codes a version number) and sets
-       itself to re-check at each logon, so it won't break when Teams updates.
+    5. Never hard-codes a version; sets a logon task so it re-checks itself and
+       won't break when Teams updates to a new version.
 
   -Quiet is used by the automatic logon re-check; a normal run is verbose.
 #>
@@ -27,6 +30,7 @@ function Bad ($m){ if($Interactive){ Write-Host $m -ForegroundColor Red } }
 $ProgId  = 'TeamsAddin.FastConnect'
 $DllName = 'Microsoft.Teams.AddinLoader.dll'
 $MsiName = 'MicrosoftTeamsMeetingAddinInstaller.msi'
+$TaskName = 'TeamsMeetingAddinFix'
 
 function Get-Platform {
     $plat = 'x64'
@@ -59,10 +63,12 @@ function Find-LoaderDll {
 }
 
 function Find-Msi {
-    foreach ($root in @($PSScriptRoot, (Split-Path $PSScriptRoot -Parent))) {
-        if ($root) {
-            $hit = Get-ChildItem -Path $root -Recurse -Filter $MsiName -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($hit) { return $hit.FullName }
+    # Non-recursive on purpose: just look next to this script (and one level up).
+    # (Never recurse System32.)
+    foreach ($dir in @($PSScriptRoot, (Split-Path $PSScriptRoot -Parent))) {
+        if ($dir) {
+            $cand = Join-Path $dir $MsiName
+            if (Test-Path $cand) { return $cand }
         }
     }
     return $null
@@ -118,18 +124,20 @@ function Register-Loader($info) {
 }
 
 function Install-SelfHeal {
+    # Register a per-user logon task that re-runs THIS script (-Quiet) from
+    # wherever it currently lives. Run from System32 so it stays allowed by
+    # policy. Best-effort: if task creation is blocked, the one-off fix still
+    # worked. Returns $true only if the task was created.
     try {
-        $dir = Join-Path $env:LOCALAPPDATA 'TeamsAddinFix'
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
-        $dest = Join-Path $dir 'Fix-TeamsAddin.ps1'
-        if ($PSCommandPath -and ((Resolve-Path $PSCommandPath).Path -ne $dest)) {
-            Copy-Item -LiteralPath $PSCommandPath -Destination $dest -Force
-        }
-        $startup = [Environment]::GetFolderPath('Startup')
-        $vbs     = Join-Path $startup 'TeamsAddinFix.vbs'
-        $launch  = 'CreateObject("WScript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""' + $dest + '"" -Quiet", 0, False'
-        Set-Content -LiteralPath $vbs -Value $launch -Encoding ASCII
-    } catch { }
+        if (-not $PSCommandPath) { return $false }
+        $script  = (Resolve-Path $PSCommandPath).Path
+        $action  = New-ScheduledTaskAction -Execute 'powershell.exe' `
+                    -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Quiet' -f $script)
+        $trigger = New-ScheduledTaskTrigger -AtLogOn -User ("{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME)
+        $set     = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $set -Force | Out-Null
+        return $true
+    } catch { return $false }
 }
 
 # ===================== main =====================
@@ -145,7 +153,7 @@ if (-not $info -and $Interactive) {
     $msi = Find-Msi
     if (-not $msi) {
         Bad "The add-in isn't installed and I can't find $MsiName next to this script."
-        Bad "Make sure the whole folder (including the .msi) was copied to this PC."
+        Bad "Copy the .msi into the same folder as this script (e.g. System32) and re-run."
         exit 1
     }
     if (Install-FromMsi $msi) { $info = Find-LoaderDll }
@@ -159,7 +167,8 @@ if (-not $info) {
 }
 
 Register-Loader $info
-if ($Interactive) { Install-SelfHeal }
+$healed = $false
+if ($Interactive) { $healed = Install-SelfHeal }
 
 $how = if ($preexisting) { 'was already on the PC' } else { 'installed from the MSI' }
 Good "SUCCESS - Teams Meeting add-in v$($info.Version) ($($info.Platform)) $how, now registered and enabled."
@@ -167,5 +176,9 @@ Info "Registered: $($info.Dll)"
 Info ''
 Info "Now CLOSE Outlook completely and reopen it - the 'Teams Meeting' button"
 Info "will be on the calendar ribbon when you create a new meeting."
-Info "(It will also re-check itself at each logon, so it won't break when Teams updates.)"
+if ($healed) {
+    Info "(A logon task was set up, so it will re-check itself and won't break when Teams updates.)"
+} else {
+    Info "(Heads-up: couldn't set the auto re-check task on this PC - just re-run this if the button ever disappears.)"
+}
 exit 0
