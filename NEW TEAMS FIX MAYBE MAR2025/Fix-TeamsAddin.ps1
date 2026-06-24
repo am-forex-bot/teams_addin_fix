@@ -139,6 +139,7 @@ Info " User: $env:USERNAME"
 Info '==================================================='
 
 $info = Find-LoaderDll
+$preexisting = [bool]$info
 
 if (-not $info -and $Interactive) {
     $msi = Find-Msi
@@ -160,7 +161,9 @@ if (-not $info) {
 Register-Loader $info
 if ($Interactive) { Install-SelfHeal }
 
-Good "SUCCESS - Teams Meeting add-in v$($info.Version) is installed, registered and enabled."
+$how = if ($preexisting) { 'was already on the PC' } else { 'installed from the MSI' }
+Good "SUCCESS - Teams Meeting add-in v$($info.Version) ($($info.Platform)) $how, now registered and enabled."
+Info "Registered: $($info.Dll)"
 Info ''
 Info "Now CLOSE Outlook completely and reopen it - the 'Teams Meeting' button"
 Info "will be on the calendar ribbon when you create a new meeting."
